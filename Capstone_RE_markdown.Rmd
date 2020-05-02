@@ -1,0 +1,456 @@
+---
+title: 'Location, Location, Location: Linear Regression on King County House Sales'
+subtitle: "Capstone IDV for PH125.9x"
+author: "KateBWilliams"
+date: "4/30/2020"
+output:
+  html_document: 
+    df_print: kable
+    number_sections: yes
+  word_document: 
+    fig_caption: yes
+    highlight: monochrome
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+One major aspect of the American Dream is house ownership. Purchasing a house represents one of the few big-ticket purchases that most people will make during their lifetimes.  Therefore, there is considerable interest in real estate valuation- namely, what makes a house worth a certain price, and what features of a house predict its sales price. Financing a home through a bank or other financial institution often requires an assessment of the property by an appraiser, who through experience and calculations of similar properties determines an estimate, or prediction, of the property's value.  
+
+The [House Sales in King County, USA](https://www.kaggle.com/harlfoxem/housesalesprediction), publically available through Kaggle, is a data set containing many of the property features that could be useful predictors for estimating a sale price.  
+
+```{r data download and splitting for train and test sets, message=FALSE, include=FALSE}
+if(!require('readr')){
+  install.packages('readr')
+  library(readr)
+}
+
+if(!require('tidyverse')){
+  install.packages('tidyverse')
+  library(tidyverse)
+}
+
+if(!require('caret')){
+  install.packages('caret')
+  library(caret)
+}
+
+if(!require('ggpubr')){
+  install.packages('ggpubr')
+  library(ggpubr)
+}
+
+
+
+###################
+#Downloading the Data
+###################
+
+if(!file.exists("kc_house_data.csv")){
+url <- "https://github.com/katebw/Captstone_-Real-Estate/raw/master/kc_house_data.csv.zip"
+
+download.file(url, "kc_house_data.csv.zip")
+}
+
+
+dl <- unzip("kc_house_data.csv.zip")
+
+dl <- read_csv(dl)
+
+set.seed(1) # this is for R 3.6.3
+
+test_index <- createDataPartition(dl$price, times = 1, p = 0.1, list = FALSE) 
+dl <- dl %>% slice(-test_index)
+validation <- dl %>% slice(test_index)
+
+```
+
+ Here we can see an overview of the partitioned training data set `dl`, representing the other 90% of the randomly sampled observations: 
+```{r glimpse, message=FALSE, warning=FALSE}
+glimpse(dl)
+```
+
+There are a variety of predictors, randing from square feet of living space, number of bedrooms, view, condition, and grade of a property (these last three are attempting to quantify more qualitative predictors).  `sqft_living15` and `sqft_lot15` are not intuitively named: they represent the averages of the nearest 15 properties to a given house.  
+
+
+Since there is a `date` column, we can attempt to investigate what is happening in sales over the course of the year. Note how there is a dip in the number of sales per month coinciding with the winter months (January is lowlighted in black). This seasonal phenomenon is well known in real estate, and is attributed to buying behavior by individuals. For instance, families with children who may move tend to purchase houses and move during the summer vacation from school so as to be less disruptive. Homes often have greater "curb appeal" during the better weather of spring and summer.
+
+```{r seasonal sales, echo=FALSE, message=FALSE, warning=FALSE}
+if(!require('lubridate')){
+  install.packages('lubridate')
+  library(lubridate)
+}
+
+time_sales<- dl%>%group_by(month = cut(date, "month"))%>%summarise(n_sales = n()) %>% mutate( type = ifelse(month(month)=="1", "highlight", "not"))
+
+
+time_sales%>%ggplot(aes(month, n_sales), fill = type)+
+  geom_col(aes(fill=type), show.legend = FALSE)+
+  scale_fill_manual(values = c("black", "grey"))+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))+
+  labs(x = "Month", y = "Number of Sales", title = "Seasonal Pattern of Number of Sales in King County")
+  
+
+detach(package:lubridate)
+
+```
+
+
+In addition, one of the most common rules of thumb in real estate is "location, location, location". So, if you break down average sale price by zipcode, you can clearly see that there is considerable variation in average sale price due to this variable.
+
+```{r Average sale price, echo=FALSE, message=FALSE, warning=FALSE}
+
+top_1<-dl%>%group_by(zipcode)%>%summarise(avg_price = mean(price))%>%arrange(desc(avg_price))%>%top_n(1)
+
+dl%>%group_by(zipcode)%>%summarise(avg_price = mean(price))%>%ggplot()+
+  geom_count(aes(x = zipcode, y= avg_price), alpha = 0.2, size = 2)+
+  geom_text(data = top_1, aes(x= zipcode, y= avg_price, label = zipcode), hjust = -0.2, vjust = 1, size = 5)+
+  geom_count(data = top_1, aes(x= zipcode, y= avg_price), color = "purple", size = 3)+
+  geom_hline(yintercept = 540088, size = 1)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x = "Zipcode", y = "Average Price ($)", title = "Average Sale Price of Houses in Various Zip Codes of King County", caption = "Horizontal line indicates county average sale price. Sale price in zipcode 98039 is highlighted in purple.")
+
+```
+
+The zipcode represented in purple encompasses the area around Bellvue, just to the west of Seattle, and is the zipcode where Microsoft and its well-paid employees live. However, it is possible that the building codes and general house size in Bellvue is larger, resulting in higher sale prices. If we mutate the data in order to add in a column of, for example, price per square foot of living space, we might be able to normalize the sale prices some. 
+
+```{r price per square foot, echo=FALSE, message=FALSE, warning=FALSE}
+dl <-dl %>% mutate(ppSFt_living = price/sqft_living) # calculate and add column for price per square foot of living space
+
+top_1<-dl%>%group_by(zipcode)%>%summarise(avg_price = mean(ppSFt_living))%>%arrange(desc(avg_price))%>%top_n(1)
+
+
+dl %>% mutate(ppSFt_living = price/sqft_living)%>%group_by(zipcode)%>%summarise(avg_ppSqft = mean(ppSFt_living))%>% ggplot()+
+  geom_count(aes(x=zipcode, y= avg_ppSqft), alpha =0.3, size = 2)+
+  geom_count( data = top_1, aes(x=zipcode, y= avg_price), color = "purple", size = 3)+
+  geom_text(data = top_1, aes(x= zipcode, y= avg_price, label = zipcode), hjust = -0.2, vjust = 1, size = 5)+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90))+
+  labs(x = "Zipcode", y = "Avegrage Price($) per Square Foot", title = "Average Price/Square Foot of Living Space for Various Zip Codes")
+
+```
+
+We can see here that normalizing for size (at least with living space), does account for some of the variation. However, the Bellvue zip code pricing is still quite high, suggesting other aspects driving the high prices for these properties. 
+
+Even within the relatively small areas encompassed by zip codes, there is considerable varibility on price per square foot. If we examine the top ten zipcodes with the highest average sale price, we can see the ranges in price represented in those areas. 
+
+```{r problem child chunk, echo=FALSE, message=FALSE, warning=FALSE}
+
+dl_temp <- dl  
+
+dl_temp$zipcode <- as.factor(dl_temp$zipcode)
+
+top_10 <- dl_temp%>% group_by(zipcode)%>%summarise(avg_price = mean(ppSFt_living)) %>% arrange(desc(avg_price))%>% top_n(10, avg_price)
+
+top_10_names <- top_10$zipcode
+
+dl_temp%>%filter(zipcode %in% top_10$zipcode)%>%mutate(type = ifelse(zipcode == top_10$zipcode[1], "highlight","not"))%>%select(zipcode, ppSFt_living, type)%>%ggplot(aes(x= zipcode, y = ppSFt_living, fill= type))+
+  geom_boxplot(show.legend = FALSE)+
+  scale_fill_manual(values = c("purple", "grey"))+
+  theme_light()+
+  labs(x = "Zip Code", y = "Average Price($) per Square Foot", title = "Variation in Price per Square Foot in Top 10 Priciest Zip Codes in King County")
+```
+
+
+Therefore, it is useful to examine other available factors that could be used as predictors for price.  
+
+# Methods and Analysis
+
+
+## Partitioning the data into training and test sets
+
+The most critical component for machine learning algorithms is to partition and set aside a test set of the data for later validation of the model. This validation set will not be used for any of the training algorithms. We can partition the data in the following way:
+
+```
+set.seed(1,sample.kind = "Rounding") # this is for R 3.6.3
+
+test_index <- createDataPartition(dl$price, times = 1, p = 0.1, list = FALSE)
+dl <- dl %>% slice(-test_index)
+validation <- dl %>% slice(test_index)
+```
+
+```{r data partitioning, include=FALSE}
+dl <-dl%>%select(-ppSFt_living) # remove created column of price per square foot
+#$zipcode <- as.numeric(dl$zipcode) # return zipcode to class numeric 
+set.seed(1, sample.kind = "Rounding")
+test_index2 <- createDataPartition(dl$price, times = 1, p =0.1, list = FALSE)
+dl_train <- dl %>% slice(-test_index2)
+dl_test <- dl %>% slice(test_index2)
+
+glimpse(dl_train)
+
+```
+We can partition the data set using a 90/10 split ( represented by `p = 0.1`), due to the fact that there are 20,000+ observations.  The 10% partition for the `validation` set still has nearly 2000 observations, which are plenty of points for effective testing of a final algorithm.
+
+## Linear regression
+
+Linear regression analysis is a simple and intuitive way to begin modeling relationships within the data, especially for continous data, such as pricing (as opposed to categorical data, such as was a property sold, yes or no).  
+
+The most basic form of linear regression is of course, the intercept and slope for a straight line.
+
+$$ Y_p = \beta_0  + \beta_1x$$
+
+The goal of determining $\beta_0$ and $\beta_1$ is to minimize the distance between the regression line and the actual data points. There are a few different ways to quantify this fit.  One is the R^2^ value, which has a value between -1 to 1.  An R^2^ value equal to 1 would effectively be a perfect fits- all values would fall exactly on the regression line. A value of -1 is a similar idea, but with a negative correlation. The closer the values are to 0, the poorer the correlation and therefore the worse the predictive power of the regression. 
+
+The Root Mean Squared Error (RMSE) is a related evaluation - an RMSE that equals 0 indicates the same thing as the R^2^ having a value of 1 or -1, that the fit of the regression is perfect. The values of RMSE can vary quite a bit more, however. 
+
+Overall, a reduction in RMSE and an improvement in R^2^ away from 0 are both heloful indicators for comparing regression algorithms and whether they represent improvements for prediction. 
+
+
+The simplest linear regression assumes a bivariate model, with one independent variable (let us assume `sqft_living`) acting on the dependent variable we are trying to predict: `price`. 
+
+```{r bivariate linear regression model, echo=FALSE}
+fit <- lm(price~ sqft_living, data = dl_train)
+summary(fit)$coefficients
+```
+
+You can see this regression line and how it fits with the data. The R^2^ value for this regression line is `r summary(fit)$r.squared`. There is clearly a positive correlation between `sqft_living` and sales `price`, but the R^2^ value indicates that there is still a considerable amount of variation in price that is not accounted for by this simple regression. 
+
+```{r linear regression plot, echo=FALSE}
+equation <- function(x){fit$coefficients[1]+ fit$coefficients[2]*x}
+ 
+top_10 <- dl%>% group_by(zipcode)%>%summarise(avg_price = mean(price)) %>% arrange(desc(avg_price))%>% top_n(10, avg_price)
+
+dl_train%>%mutate(type = ifelse(zipcode == top_10$zipcode[1], "highlight","not"))%>%ggplot(aes(x= sqft_living, y = price))+
+  geom_point(aes(color = type, alpha = type), show.legend = FALSE)+
+  scale_alpha_manual(values = c(0.9, 0.3))+
+  scale_color_manual(values = c("purple", "grey"))+
+  stat_function(fun = equation, geom = "line", show.legend = FALSE, color = "black", size= 1)+
+  theme_light()+
+  labs( x = "Sq. Ft. of Living Space", y = "Average Sale Price($)", title = "Correlation between Sq. Ft. of Living space and Sale Price in King County", caption = "Purple points represent sales in zip code 98039")
+
+```
+
+
+Note how the data appears to have the typical "fan shape" associated indicative of **heteroscedasticity**. Heteroscedasticity implies that there is some additional factor acting on the data in a predictable fashion. 
+
+If we examine the residuals plots from the regession algorithm, the plots still show distinctive predictive patterns (in other words, the residuals are not randomly scattered), suggesting that this bivariate model is not accounting for the variation in price, and is not the best predictor.  Here, the residuals in the `Residuals vs. Fitted` plot also follow the typical *fan* pattern of heteroscedasticity.   
+
+```{r plotting residuals from univariate model, echo=FALSE}
+par(mfrow = c(2,2))
+plot(fit) # plotting residuals from linear regression
+
+```
+```{r bivariate RMSE, include=FALSE}
+y_hat_lm <- predict(fit, dl_test)
+
+RMSE_lm <- sqrt(mean((y_hat_lm - dl_test$price)^2))
+```
+
+In order to determine whether any of the other predictors are more effective in a bivariate model, we can examine the individual R^2^ values for each predictor. 
+
+```{r other individual predictors plot, echo=FALSE}
+foo <- apply(dl_train[4:21], 2, function(x) {
+  fit_foo <- lm(price~x, data = dl_train)
+  summary(fit_foo)$r.squared
+})
+
+par(mfrow = c(1,1))
+par(las =2)
+par(mar=c(8,4,4,4))
+barplot(foo, ylab = "R Squared Value", col = ifelse(foo >=0.3,"black", "grey"), main = " R Squared Values of Predictors in the Data Set")
+```
+
+We can see that `sqft_living` is still the best individual predictor, followed by `grade`, `sqft_above`, `sqft_living15`. 
+
+## Multivariate Linear Regression
+
+The fact that at least three other predictors have R^2^ values nearly as high (>0.3) as `sqft_living` predictor begs the question whether grouping these variable together will reduce residual error significantly.  
+
+Multivariate linear regression is similar to the simple univariate model shown above, with additional variables added into the equation.  
+$$ Y_p = \beta_0  + \beta_1x_2 + \beta_2x_2 + \beta_3x_3...\beta_nx_n$$
+Based upon the predictors above that show `sqft_living`, `grade`, `sqft_above`, `sqft_living15` all have the strongest individual R^2^ values, we can incorporate these predictors into a multivariate algorithm. 
+
+```{r  simple multivariate fit algorithm}
+fit_mv <- lm(price~ sqft_living+
+               grade+
+               sqft_above+
+               sqft_living15, data = dl_train )
+summary(fit_mv)$coefficients
+```
+
+
+```{r simple multivariate fit, echo=FALSE, message=FALSE, warning=FALSE}
+par(mfrow = c(2,2))
+plot(fit_mv)
+```
+
+We can see that there is some improvement in the R^2^ value from the summary, and there is some improvement in the residuals plots. However, there is still heteroschedasticity, and so another undetermined factor is influencing the data. 
+
+```{r simple mv RMSE, include=FALSE}
+y_hat_mv <- predict(fit_mv, dl_test)
+
+RMSE_mv <- sqrt(mean((y_hat_mv - dl_test$price)^2))
+```
+
+
+
+```{r creating numerics verion of the code for stepwise, include=FALSE}
+
+dl_numerics <- dl %>% select(-c(id, date)) #trimming the tibble to focus on numeric predictors
+```
+
+
+## Stepwise Regression Analysis
+
+Would adding more predictors make the algorithm better?  Intuitively, the answer would be yes, as the more information you have, the better your ability to predict. However, some predictors are not very useful, and their contribution to prediction is minimal.  
+
+WIth many predictors, it is possible to perform a stepwise analysis of the various predictors to determine their "quality" in their ability to contribute to algorithm performance (i.e. minimizing residual error).  
+
+In order to perform this analysis, we istall two additional libraries:
+
+```{r message=FALSE, warning=FALSE}
+
+library(leaps) 
+library(MASS)
+
+```
+```{r message=FALSE, warning=FALSE, include=FALSE}
+if(!require('leaps')){
+  install.packages('leaps')
+  library(leaps)
+}
+if(!require('MASS')){
+  install.packages('MASS')
+  library(MASS)
+}
+```
+
+
+We can use a cross-validation model within this algorithm development method, which requires sampling, and we set the 10-fold cross-validation in `train_ctrl`. Additionally, we set the number of predictors to 18 through the `tuneGrid`. This is the number of independent variables we intend to assess for predictive quality. *Note that we have removed `id` and `date` as predictors. The assumption is that `id` is random, and that `date` does not have much impact on sales price.*  There are a few options for the `method` parameter, but here we will use the `leapBackward` method, which starts with all predictors and iteratively trims them from the algorithm until it determines an optimal predictor set. 
+
+```
+set.seed(123, sample.kind = "Rounding") # for repeatability, R 3.6.3
+
+train_ctrl <- trainControl(method = "cv", number = 10) # set-up for 10-fold cross-validation
+
+step_model <- train(price~., data = dl_numerics, method = "leapBackward", tuneGrid = data.frame(nvmax=1:18), trControl = train_ctrl) 
+```
+```{r include=FALSE}
+set.seed(123, sample.kind = "Rounding") # for repeatability, R 3.6.3
+
+train_ctrl <- trainControl(method = "cv", number = 10) # set-up for 10-fold cross-validation
+
+step_model <- train(price~., data = dl_numerics, method = "leapBackward", tuneGrid = data.frame(nvmax=1:18), trControl = train_ctrl) # using up to 18 variables (n-1) columns, in this case the price, the dependent variable, is not included as a predictor
+
+```
+
+
+```{r stepwise regression backward, message=FALSE, warning=FALSE}
+step_model$results
+
+coef(step_model$finalModel, step_model$bestTune[,1])
+```
+
+The ouptut reveals that a majority of predictors were incorporated into the best algorithm, although the RMSE is still quite high.  
+
+Incorporating the recommended predictors from the stepwise backward regression, and adding them into a multivariate regression model gives the following outcome.  
+```{r many parameter multivariate regression, echo=FALSE}
+fit_step <- lm(price~ bedrooms+
+            bathrooms+
+            sqft_living+
+            sqft_lot+
+            floors+
+            waterfront+
+            view+
+            condition+
+            grade+
+            sqft_above+
+            yr_renovated+
+            zipcode+
+            lat+
+            long+
+            sqft_living15+
+            sqft_lot15+
+            sqft_basement, data = dl_train)
+
+
+summary(fit_step)$coefficients
+par(mfrow = c(2,2))
+plot(fit_step)
+
+```
+```{r stepwise RMSE, include=FALSE}
+y_hat_mv2 <- predict(fit_step, dl_test)
+
+RMSE_mv2<- sqrt(mean((y_hat_mv2 - dl_test$price)^2))
+```
+
+
+### Comparison of the different RMSE values using the `dl_test` set.
+
+Analysis Method | RMSE       | R^2^ 
+----------------|------------|-----
+Bivariate       |`r RMSE_lm` |`r summary(fit)$r.squared`
+Multivariate    |`r RMSE_mv` |`r summary(fit_mv)$r.squared`
+Stepwise        |`r RMSE_mv2`|`r summary(fit_step)$r.squared`
+
+
+
+This clearly shows that using most of the predictors available gives the smallest RMSE and best R^2^ value.
+
+## Results
+
+Now that we have a potential algorithm, we need to return to the orginal training `dl` and test `validation` data sets that were partitioned in the beginning. 
+
+We retrain the *stepwise* algorithm on the full `dl` set, and use this new trained algorithm to predict against the `validation` test set that was partitioned at the beginning of the analysis. 
+
+```{r final validation, echo=FALSE, warning=FALSE}
+fit_step_dl <- lm(price~ bedrooms+
+            bathrooms+
+            sqft_living+
+            sqft_lot+
+            floors+
+            waterfront+
+            view+
+            condition+
+            grade+
+            sqft_above+
+            yr_renovated+
+            zipcode+
+            lat+
+            long+
+            sqft_living15+
+            sqft_lot15+
+            sqft_basement, data = dl)
+
+
+summary(fit_step_dl)$coefficients
+par(mfrow = c(2,2))
+plot(fit_step_dl)
+```
+
+
+```{r final RMSE, warning=FALSE, include=FALSE}
+y_hat_final <- predict(fit_step_dl, validation)
+
+RMSE_final <- sqrt(mean((y_hat_final - validation$price)^2))
+
+```
+
+
+ Final RMSE with the validation set is **`r RMSE_final`**.
+
+ 
+# Conclusion and Future Directions
+
+
+The final RMSE is consistent with RMSE from the Stepwise regression predictors in the training set, however, an RMSE in the hundreds of thousands leaves room for improvement. Whether more advanced regression analysis could improve the outcome is unclear; another possibility is that the predictor variables captured in the data set are insufficient for more effective predictive algorithms. This seems especially possible given the continued heteroscedasticity in the residual plots, even when most of the predictors have been used. 
+
+Indeed, one set of predictors that would be useful, but likely will never be available, centers around the concept of user bias. User bias is relatively easy to capture when users actively rate or categorize, for instance on Yelp or Amazon reviews. Even final purchase behavior over time can give insight into a user's preference. Unfortunaly, although real estate presumably suffers from user bias (the emotional or "gut instinct" involved for most people in purchasing a home), the limited frequency of purchase behavior prevents capture of these predictive variables.  
+
+What user variables might be indicative of how much a "user" or potential buyer is willing to pay? One can imagine that income, family/marital status, reason for purchase (i.e. moving to a new area? need to purchase quickly for a 1031 exchange?) might be information with predictive value. Since house purchasing is behavioural, other purchase decsions may also be predictive. For instance, automobiles, much like houses, require some form of negotiations on price before purchase. Behavior and decisions in the automobile purchase may indicate what type of property a person may buy, and how much that person may be willing to offer for the property.  
+
+
+
+
+
+
+
+
